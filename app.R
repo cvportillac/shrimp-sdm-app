@@ -9,6 +9,71 @@ library(htmlwidgets)
 library(DT)
 
 # ============================================================================
+# DESCARGAR DATOS DESDE GITHUB
+# ============================================================================
+
+github_raw <- "https://github.com/cvportillac/shrimp-sdm-app/raw/main"
+
+if (!dir.exists("data")) {
+  message("Descargando datos desde GitHub...")
+  
+  # Crear estructura de carpetas
+  dir.create("data/Shapefiles", recursive = TRUE)
+  especies <- c("L.occidentalis", "P.brevirostris", "P.californiensis", 
+                "S.agassizii", "X.rivetti")
+  meses <- c("jan", "feb", "mar", "apr", "may", "jun", 
+             "jul", "aug", "sep", "oct", "nov", "dec")
+  
+  for (sp in especies) {
+    dir.create(file.path("data", sp), recursive = TRUE)
+  }
+  
+  # Descargar rasters
+  total_files <- length(especies) * length(meses) * 3  # presente + 2 futuros
+  file_count <- 0
+  
+  for (sp in especies) {
+    message("Descargando ", sp, "...")
+    for (mes in meses) {
+      # Presente
+      url <- paste0(github_raw, "/data/", sp, "/", mes, "_pres.tif")
+      dest <- file.path("data", sp, paste0(mes, "_pres.tif"))
+      try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+      file_count <- file_count + 1
+      
+      # Futuro RCP 26
+      url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_26.tif")
+      dest <- file.path("data", sp, paste0(mes, "_2050_26.tif"))
+      try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+      file_count <- file_count + 1
+      
+      # Futuro RCP 85
+      url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_85.tif")
+      dest <- file.path("data", sp, paste0(mes, "_2050_85.tif"))
+      try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+      file_count <- file_count + 1
+      
+      if (file_count %% 10 == 0) {
+        message("Descargados ", file_count, " de ", total_files, " archivos...")
+      }
+    }
+  }
+  
+  # Descargar shapefiles
+  message("Descargando shapefiles...")
+  shp_ext <- c(".shp", ".shx", ".dbf", ".prj", ".cpg")
+  for (ext in shp_ext) {
+    url <- paste0(github_raw, "/data/Shapefiles/UACs_fixed", ext)
+    dest <- file.path("data/Shapefiles", paste0("UACs_fixed", ext))
+    try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+  }
+  
+  message("¡Descarga completada!")
+} else {
+  message("Datos ya disponibles localmente.")
+}
+
+# ============================================================================
 # INTERFAZ DE USUARIO
 # ============================================================================
 
@@ -144,9 +209,9 @@ ui <- dashboardPage(
 
 server <- function(input, output, session) {
   
-  # Ruta base y shapefile
-  base_path <- "F:/App_camaron"
-  uac_path <- "F:/App_camaron/Shapefiles/UACs_fixed.shp"
+  # Rutas relativas
+  base_path <- "data"
+  uac_path <- "data/Shapefiles/UACs_fixed.shp"
   
   # Nombres completos de especies para display
   species_names <- c(
