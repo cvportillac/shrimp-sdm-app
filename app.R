@@ -7,6 +7,7 @@ library(shinydashboard)
 library(shinyWidgets)
 library(htmlwidgets)
 library(DT)
+library(fmsb)
 
 # ============================================================================
 # DESCARGAR DATOS DESDE GITHUB
@@ -41,13 +42,13 @@ if (!dir.exists("data")) {
       try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
       file_count <- file_count + 1
       
-      # Futuro RCP 26
+      # Futuro SSP 26
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_26.tif")
       dest <- file.path("data", sp, paste0(mes, "_2050_26.tif"))
       try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
       file_count <- file_count + 1
       
-      # Futuro RCP 85
+      # Futuro SSP 85
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_85.tif")
       dest <- file.path("data", sp, paste0(mes, "_2050_85.tif"))
       try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
@@ -74,6 +75,13 @@ if (!dir.exists("data")) {
 }
 
 # ============================================================================
+# CONFIGURACIÓN DE RUTAS
+# ============================================================================
+
+base_path <- "data"
+uac_path <- file.path(base_path, "Shapefiles/UACs_fixed.shp")
+
+# ============================================================================
 # INTERFAZ DE USUARIO
 # ============================================================================
 
@@ -89,7 +97,8 @@ ui <- dashboardPage(
     width = 300,
     sidebarMenu(
       menuItem("Análisis para el Pacífico colombiano", tabName = "maps", icon = icon("map")),
-      menuItem("Análisis por Unidad Ambiental Costera - UAC", tabName = "uacs", icon = icon("layer-group"))
+      menuItem("Análisis por Unidad Ambiental Costera - UAC", tabName = "uacs", icon = icon("layer-group")),
+      menuItem("Análisis Temporal por Especie", tabName = "temporal", icon = icon("chart-line"))
     ),
     
     hr(),
@@ -119,8 +128,8 @@ ui <- dashboardPage(
     
     radioButtons("scenario",
                  "Escenario Futuro 2050:",
-                 choices = c("Optimista (RCP 2.6)" = "26",
-                             "Pesimista (RCP 8.5)" = "85"),
+                 choices = c("Optimista (SSP 1-2.6)" = "26",
+                             "Pesimista (SSP 5-8.5)" = "85"),
                  selected = "26"),
     
     hr(),
@@ -198,6 +207,24 @@ ui <- dashboardPage(
                     solidHeader = TRUE, width = 12,
                     plotOutput("uac_comparison_plot", height = 400))
               )
+      ),
+      
+      tabItem(tabName = "temporal",
+              fluidRow(
+                box(title = "Variación Mensual del Área de Distribución",
+                    status = "primary", solidHeader = TRUE, width = 12,
+                    plotOutput("spider_plot", height = 650))
+              ),
+              fluidRow(
+                box(title = "Resumen de Resultados por Especie",
+                    status = "success", solidHeader = TRUE, width = 12,
+                    verbatimTextOutput("species_summary"))
+              ),
+              fluidRow(
+                box(title = "Tabla de Datos Mensuales",
+                    status = "info", solidHeader = TRUE, width = 12,
+                    DTOutput("spider_data_table"))
+              )
       )
     )
   )
@@ -209,11 +236,6 @@ ui <- dashboardPage(
 
 server <- function(input, output, session) {
   
-  # Rutas relativas
-  base_path <- "data"
-  uac_path <- "data/Shapefiles/UACs_fixed.shp"
-  
-  # Nombres completos de especies para display
   species_names <- c(
     "L.occidentalis" = "Litopenaeus occidentalis",
     "X.rivetti" = "Xiphopenaeus riveti",
@@ -234,11 +256,202 @@ server <- function(input, output, session) {
     loaded = FALSE
   )
   
+  # ============================================================================
+  # FUNCIÓN PARA CALCULAR ÁREA TOTAL DEL ÁREA DE ESTUDIO
+  # ============================================================================
+  
+  calculate_total_study_area <- function(species, base_path) {
+    tryCatch({
+      especies_path <- file.path(base_path, species)
+      pres_file <- file.path(especies_path, "jan_pres.tif")
+      
+      if (!file.exists(pres_file)) {
+        return(NULL)
+      }
+      
+      rast_ref <- rast(pres_file)
+      res_x <- res(rast_ref)[1]
+      res_y <- res(rast_ref)[2]
+      pixel_area <- abs(res_x * res_y) * 111 * 111
+      
+      total_pixels <- sum(!is.na(values(rast_ref)))
+      total_area <- total_pixels * pixel_area
+      
+      return(total_area)
+      
+    }, error = function(e) {
+      message("Error calculando área total: ", e$message)
+      return(NULL)
+    })
+  }
+  
+  # ============================================================================
+  # FUNCIÓN PARA CALCULAR ÁREAS MENSUALES
+  # ============================================================================
+  
+  calculate_monthly_areas <- function(species, base_path, threshold) {
+    
+    meses <- c("jan", "feb", "mar", "apr", "may", "jun", 
+               "jul", "aug", "sep", "oct", "nov", "dec")
+    
+    meses_nombres <- c("Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                       "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+    
+    especies_path <- file.path(base_path, species)
+    
+    # Calcular área total una vez
+    total_area <- calculate_total_study_area(species, base_path)
+    
+    if (is.null(total_area)) {
+      return(NULL)
+    }
+    
+    resultados <- data.frame(
+      Mes = meses_nombres,
+      Presente = numeric(12),
+      Futuro_2050_SSP126 = numeric(12),
+      Futuro_2050_SSP585 = numeric(12),
+      Presente_km2 = numeric(12),
+      Futuro_2050_SSP126_km2 = numeric(12),
+      Futuro_2050_SSP585_km2 = numeric(12),
+      stringsAsFactors = FALSE
+    )
+    
+    for (i in seq_along(meses)) {
+      mes <- meses[i]
+      
+      tryCatch({
+        pres_file <- file.path(especies_path, paste0(mes, "_pres.tif"))
+        fut_26_file <- file.path(especies_path, paste0(mes, "_2050_26.tif"))
+        fut_85_file <- file.path(especies_path, paste0(mes, "_2050_85.tif"))
+        
+        if (!file.exists(pres_file)) {
+          message("Archivo no encontrado: ", pres_file)
+          next
+        }
+        
+        # Presente - USAR UMBRAL DINÁMICO
+        pres_rast <- rast(pres_file)
+        pres_prob <- (pres_rast / 1000) * 100
+        pres_bin <- pres_prob >= threshold
+        
+        res_x <- res(pres_rast)[1]
+        res_y <- res(pres_rast)[2]
+        pixel_area <- abs(res_x * res_y) * 111 * 111
+        
+        area_pres <- sum(values(pres_bin) == 1, na.rm = TRUE) * pixel_area
+        resultados$Presente[i] <- (area_pres / total_area) * 100
+        resultados$Presente_km2[i] <- area_pres
+        
+        # Futuro SSP 1-2.6
+        if (file.exists(fut_26_file)) {
+          fut_26_rast <- rast(fut_26_file)
+          fut_26_prob <- (fut_26_rast / 1000) * 100
+          fut_26_bin <- fut_26_prob >= threshold
+          area_26 <- sum(values(fut_26_bin) == 1, na.rm = TRUE) * pixel_area
+          resultados$Futuro_2050_SSP126[i] <- (area_26 / total_area) * 100
+          resultados$Futuro_2050_SSP126_km2[i] <- area_26
+        }
+        
+        # Futuro SSP 5-8.5
+        if (file.exists(fut_85_file)) {
+          fut_85_rast <- rast(fut_85_file)
+          fut_85_prob <- (fut_85_rast / 1000) * 100
+          fut_85_bin <- fut_85_prob >= threshold
+          area_85 <- sum(values(fut_85_bin) == 1, na.rm = TRUE) * pixel_area
+          resultados$Futuro_2050_SSP585[i] <- (area_85 / total_area) * 100
+          resultados$Futuro_2050_SSP585_km2[i] <- area_85
+        }
+        
+      }, error = function(e) {
+        message("Error procesando ", mes, ": ", e$message)
+      })
+    }
+    
+    attr(resultados, "total_area") <- total_area
+    
+    return(resultados)
+  }
+  
+  # ============================================================================
+  # FUNCIÓN PARA GENERAR RESUMEN POR ESPECIE
+  # ============================================================================
+  
+  generate_species_summary <- function(datos, species_name) {
+    if (is.null(datos)) return("No hay datos disponibles")
+    
+    total_area <- attr(datos, "total_area")
+    area_uac <- 27965  # Área de las UACs en km²
+    
+    # Calcular promedios
+    prom_presente_km2 <- mean(datos$Presente_km2, na.rm = TRUE)
+    prom_presente_porc <- (prom_presente_km2 / area_uac) * 100
+    
+    prom_ssp126_km2 <- mean(datos$Futuro_2050_SSP126_km2, na.rm = TRUE)
+    prom_ssp126_porc <- (prom_ssp126_km2 / area_uac) * 100
+    
+    prom_ssp585_km2 <- mean(datos$Futuro_2050_SSP585_km2, na.rm = TRUE)
+    prom_ssp585_porc <- (prom_ssp585_km2 / area_uac) * 100
+    
+    # Calcular cambios
+    cambio_ssp126_km2 <- prom_ssp126_km2 - prom_presente_km2
+    cambio_ssp126_porc <- ((prom_ssp126_km2 - prom_presente_km2) / prom_presente_km2) * 100
+    
+    cambio_ssp585_km2 <- prom_ssp585_km2 - prom_presente_km2
+    cambio_ssp585_porc <- ((prom_ssp585_km2 - prom_presente_km2) / prom_presente_km2) * 100
+    
+    # Determinar tipo de cambio y redacción
+    if (cambio_ssp126_km2 > 0) {
+      texto_ssp126 <- paste0("una expansión de ", 
+                             format(round(cambio_ssp126_km2, 2), big.mark = ","), 
+                             " km² (+", round(abs(cambio_ssp126_porc), 2), "% de ganancia)")
+    } else {
+      texto_ssp126 <- paste0("una contracción de ", 
+                             format(round(abs(cambio_ssp126_km2), 2), big.mark = ","), 
+                             " km² (", round(cambio_ssp126_porc, 2), "% de pérdida)")
+    }
+    
+    if (cambio_ssp585_km2 > 0) {
+      texto_ssp585 <- paste0("una expansión significativa a ", 
+                             format(round(prom_ssp585_km2, 2), big.mark = ","), 
+                             " km² (", round(prom_ssp585_porc, 2), "%), equivalente a una ganancia de ", 
+                             format(round(cambio_ssp585_km2, 2), big.mark = ","), 
+                             " km² (+", round(abs(cambio_ssp585_porc), 2), "% respecto al presente)")
+    } else {
+      texto_ssp585 <- paste0("una reducción drástica a ", 
+                             format(round(prom_ssp585_km2, 2), big.mark = ","), 
+                             " km² (", round(prom_ssp585_porc, 2), "%), equivalente a una pérdida de ", 
+                             format(round(abs(cambio_ssp585_km2), 2), big.mark = ","), 
+                             " km² (", round(cambio_ssp585_porc, 2), "% respecto al presente)")
+    }
+    
+    # Construir párrafo
+    parrafo <- paste0(
+      "El análisis del área idónea para la distribución potencial de ", species_name, 
+      " reveló un área promedio de ", format(round(prom_presente_km2, 2), big.mark = ","), 
+      " km² (", round(prom_presente_porc, 2), 
+      "% de las Unidades Ambientales Costeras, ", format(area_uac, big.mark = ","), 
+      " km²) en el período presente. ",
+      "Las proyecciones bajo escenarios climáticos contrastantes muestran tendencias divergentes para 2050: ",
+      "bajo el escenario optimista SSP1-2.6, se proyecta un área de ", 
+      format(round(prom_ssp126_km2, 2), big.mark = ","), 
+      " km² (", round(prom_ssp126_porc, 2), "%), representando ", 
+      texto_ssp126, ". ",
+      "En contraste, el escenario pesimista SSP5-8.5 proyecta ", 
+      texto_ssp585, "."
+    )
+    
+    return(parrafo)
+  }
+  
+  # ============================================================================
+  # CARGA DE DATOS PRINCIPALES
+  # ============================================================================
+  
   load_raster_data <- function() {
     tryCatch({
       withProgress(message = 'Cargando datos...', value = 0, {
         
-        # Construir rutas con la especie seleccionada
         species_path <- file.path(base_path, input$species)
         present_file <- file.path(species_path, paste0(input$month, "_pres.tif"))
         future_file <- file.path(species_path, paste0(input$month, "_2050_", input$scenario, ".tif"))
@@ -321,7 +534,6 @@ server <- function(input, output, session) {
     })
   }
   
-  # Cargar datos automáticamente al iniciar
   observe({
     load_raster_data()
   })
@@ -342,7 +554,8 @@ server <- function(input, output, session) {
   })
   
   output$title_future <- renderText({
-    paste("Proyección 2050 (RCP", input$scenario, ") -", species_names[input$species], "-", month_names[input$month])
+    paste("Proyección 2050 (SSP", gsub("26", "1-2.6", gsub("85", "5-8.5", input$scenario)), ") -", 
+          species_names[input$species], "-", month_names[input$month])
   })
   
   # MAPAS PRINCIPALES
@@ -578,10 +791,8 @@ server <- function(input, output, session) {
     present_bin <- raster_data$present_binary
     future_bin <- raster_data$future_binary
     
-    # Convertir UACs a SpatVector para terra
     uacs_vect <- vect(uacs)
     
-    # Calcular resolución
     res_x <- res(changes_rast)[1]
     res_y <- res(changes_rast)[2]
     pixel_area <- abs(res_x * res_y) * 111 * 111
@@ -592,12 +803,10 @@ server <- function(input, output, session) {
       uac_name <- uacs$nombre[i]
       uac_poly <- uacs_vect[i]
       
-      # Extraer valores dentro del polígono
       changes_extract <- extract(changes_rast, uac_poly, fun = NULL)
       present_extract <- extract(present_bin, uac_poly, fun = NULL)
       future_extract <- extract(future_bin, uac_poly, fun = NULL)
       
-      # Calcular áreas
       changes_vals <- changes_extract[[2]]
       present_vals <- present_extract[[2]]
       future_vals <- future_extract[[2]]
@@ -623,13 +832,11 @@ server <- function(input, output, session) {
     
     df_result <- do.call(rbind, lapply(results, as.data.frame))
     
-    # Ordenar según el orden especificado
     orden_uacs <- c("Norte_Choco", "Baudo_San Juan", "Malaga_Buenaventura", "Llanura_Aluvial_Sur")
     df_result$UAC <- factor(df_result$UAC, levels = orden_uacs)
     df_result <- df_result[order(df_result$UAC), ]
     df_result$UAC <- as.character(df_result$UAC)
     
-    # Reemplazar nombres con tildes
     df_result$UAC <- gsub("Norte_Choco", "Norte_Chocó", df_result$UAC)
     df_result$UAC <- gsub("Baudo_San Juan", "Baudó_San Juan", df_result$UAC)
     df_result$UAC <- gsub("Malaga_Buenaventura", "Málaga_Buenaventura", df_result$UAC)
@@ -666,7 +873,6 @@ server <- function(input, output, session) {
   output$table_uac_complete <- renderDT({
     df <- calculate_uac_areas()
     
-    # Seleccionar y ordenar columnas en el orden solicitado
     df_display <- data.frame(
       UAC = gsub("_", " ", df$UAC),
       Area_Presente = df$Area_Presente_km2,
@@ -728,21 +934,19 @@ server <- function(input, output, session) {
   output$uac_comparison_plot <- renderPlot({
     df <- calculate_uac_areas()
     
-    # Aplicar orden y quitar guiones bajos para visualización
     df$UAC_display <- gsub("_", " ", df$UAC)
     orden_display <- c("Norte Chocó", "Baudó San Juan", "Málaga Buenaventura", "Llanura Aluvial Sur")
     df$UAC_display <- factor(df$UAC_display, levels = orden_display)
     
     par(mfrow = c(1, 2), mar = c(10, 5, 3, 2))
     
-    # Gráfico 1: Áreas presente vs futuro (colores modernos distintos)
     areas_matrix <- rbind(df$Area_Presente_km2, df$Area_Futura_km2)
     colnames(areas_matrix) <- as.character(df$UAC_display)
     
     max_y1 <- max(areas_matrix) * 1.3
     
     bp1 <- barplot(areas_matrix, beside = TRUE,
-                   col = c("#5E35B1", "#FF6F00"),  # Púrpura y naranja oscuro
+                   col = c("#5E35B1", "#FF6F00"),
                    main = "Área Presente vs Futura por UAC",
                    ylab = "Área (km²)",
                    ylim = c(0, max_y1),
@@ -757,7 +961,6 @@ server <- function(input, output, session) {
            horiz = TRUE,
            xpd = TRUE)
     
-    # Gráfico 2: Cambios por categoría (mantener colores originales: rojo, gris, verde)
     cambios_matrix <- rbind(df$Perdida_km2, df$Sin_Cambios_km2, df$Ganancia_km2)
     colnames(cambios_matrix) <- as.character(df$UAC_display)
     
@@ -778,6 +981,167 @@ server <- function(input, output, session) {
            bty = "n",
            horiz = TRUE,
            xpd = TRUE)
+  })
+  
+  # ============================================================================
+  # DIAGRAMA DE ARAÑA Y RESUMEN DE ESPECIE
+  # ============================================================================
+  
+  monthly_data <- reactive({
+    req(input$species, input$threshold)
+    
+    withProgress(message = 'Calculando datos mensuales...', value = 0, {
+      datos <- calculate_monthly_areas(input$species, base_path, input$threshold)
+      incProgress(1)
+      return(datos)
+    })
+  })
+  
+  output$species_summary <- renderText({
+    datos <- monthly_data()
+    req(!is.null(datos))
+    
+    resumen <- generate_species_summary(datos, species_names[input$species])
+    return(resumen)
+  })
+  
+  output$spider_plot <- renderPlot({
+    datos <- monthly_data()
+    req(!is.null(datos), nrow(datos) > 0)
+    
+    total_area <- attr(datos, "total_area")
+    
+    max_val <- 100
+    min_val <- 0
+    
+    spider_data <- rbind(
+      rep(max_val, 12),
+      rep(min_val, 12),
+      datos$Presente,
+      datos$Futuro_2050_SSP126,
+      datos$Futuro_2050_SSP585
+    )
+    
+    colnames(spider_data) <- datos$Mes
+    spider_data <- as.data.frame(spider_data)
+    
+    rango_presente <- paste0(round(min(datos$Presente), 1), " - ", round(max(datos$Presente), 1), "%")
+    rango_ssp126 <- paste0(round(min(datos$Futuro_2050_SSP126), 1), " - ", round(max(datos$Futuro_2050_SSP126), 1), "%")
+    rango_ssp585 <- paste0(round(min(datos$Futuro_2050_SSP585), 1), " - ", round(max(datos$Futuro_2050_SSP585), 1), "%")
+    
+    par(mar = c(4, 2, 4, 2), mfrow = c(1, 1))
+    
+    radarchart(
+      spider_data,
+      axistype = 1,
+      
+      pcol = c("#2E86C1", "#27AE60", "#E74C3C"),
+      pfcol = c(rgb(0.18, 0.53, 0.76, 0.3),
+                rgb(0.15, 0.68, 0.38, 0.3),
+                rgb(0.91, 0.30, 0.24, 0.3)),
+      plwd = 3,
+      plty = 1,
+      
+      cglcol = "grey70",
+      cglty = 1,
+      cglwd = 0.8,
+      axislabcol = "grey30",
+      
+      vlcex = 1.4,
+      calcex = 1.1,
+      seg = 5,
+      
+      title = ""
+    )
+    
+    species_title <- switch(input$species,
+                            "L.occidentalis" = expression("Variación mensual del área de distribución potencial de " * italic("Litopenaeus occidentalis")),
+                            "X.rivetti" = expression("Variación mensual del área de distribución potencial de " * italic("Xiphopenaeus riveti")),
+                            "S.agassizii" = expression("Variación mensual del área de distribución potencial de " * italic("Solenocera agassizii")),
+                            "P.brevirostris" = expression("Variación mensual del área de distribución potencial de " * italic("Penaeus brevirostris")),
+                            "P.californiensis" = expression("Variación mensual del área de distribución potencial de " * italic("Penaeus californiensis")))
+    
+    mtext(species_title, side = 3, line = 1.5, cex = 1.2)
+    
+    legend(
+      x = "topright",
+      legend = c("Presente", "Futuro 2050 SSP 1-2.6", "Futuro 2050 SSP 5-8.5"),
+      col = c("#2E86C1", "#27AE60", "#E74C3C"),
+      lty = 1,
+      lwd = 3,
+      bty = "n",
+      cex = 1.2
+    )
+    
+    legend(
+      x = "topright",
+      y = NULL,
+      inset = c(0, 0.19),
+      legend = c("Rango:", rango_presente, rango_ssp126, rango_ssp585),
+      col = c("black", "#2E86C1", "#27AE60", "#E74C3C"),
+      pch = c(NA, 15, 15, 15),
+      bty = "n",
+      cex = 1.2,
+      pt.cex = 1.8
+    )
+    
+    mtext(
+      paste0("Porcentaje del área de estudio (Área total = ",
+             format(round(total_area, 0), big.mark = ","), 
+             " km²) | Umbral: ", input$threshold, "%"),
+      side = 1, 
+      line = 2.5, 
+      cex = 1.0,
+      col = "grey20"
+    )
+  })
+  
+  output$spider_data_table <- renderDT({
+    datos <- monthly_data()
+    req(!is.null(datos))
+    
+    datos_display <- data.frame(
+      Mes = datos$Mes,
+      Presente_Porc = datos$Presente,
+      Presente_km2 = datos$Presente_km2,
+      Futuro_SSP126_Porc = datos$Futuro_2050_SSP126,
+      Futuro_SSP126_km2 = datos$Futuro_2050_SSP126_km2,
+      Futuro_SSP585_Porc = datos$Futuro_2050_SSP585,
+      Futuro_SSP585_km2 = datos$Futuro_2050_SSP585_km2
+    )
+    
+    colnames(datos_display) <- c(
+      "Mes", 
+      "Presente (%)", 
+      "Presente (km²)",
+      "Futuro SSP 1-2.6 (%)", 
+      "Futuro SSP 1-2.6 (km²)",
+      "Futuro SSP 5-8.5 (%)", 
+      "Futuro SSP 5-8.5 (km²)"
+    )
+    
+    datatable(
+      datos_display,
+      options = list(
+        pageLength = 12,
+        dom = 't',
+        scrollX = TRUE,
+        columnDefs = list(
+          list(className = 'dt-center', targets = 1:6)
+        )
+      ),
+      rownames = FALSE
+    ) %>%
+      formatRound(columns = 2:7, digits = 2) %>%
+      formatStyle(c('Presente (%)', 'Presente (km²)'),
+                  backgroundColor = '#E3F2FD',
+                  fontWeight = 'bold') %>%
+      formatStyle(c('Futuro SSP 1-2.6 (%)', 'Futuro SSP 1-2.6 (km²)'),
+                  backgroundColor = '#E8F5E9',
+                  fontWeight = 'bold') %>%
+      formatStyle(c('Futuro SSP 5-8.5 (%)', 'Futuro SSP 5-8.5 (km²)'),
+                  backgroundColor = '#FFEBEE',
+                  fontWeight = 'bold')
   })
 }
 
