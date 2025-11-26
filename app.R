@@ -15,7 +15,6 @@ library(fmsb)
 
 github_raw <- "https://github.com/cvportillac/shrimp-sdm-app/raw/main"
 
-# Función auxiliar para descargar con reintentos
 download_with_retry <- function(url, destfile, max_attempts = 3) {
   for (attempt in 1:max_attempts) {
     result <- try({
@@ -49,7 +48,6 @@ if (!dir.exists("data")) {
     dir.create(file.path("data", sp), recursive = TRUE, showWarnings = FALSE)
   }
   
-  # Descargar shapefiles PRIMERO
   message("\n>>> DESCARGANDO SHAPEFILES (PRIORIDAD ALTA) <<<")
   shp_components <- c("shp", "shx", "dbf", "prj")
   shp_success <- TRUE
@@ -75,7 +73,6 @@ if (!dir.exists("data")) {
     }
   }
   
-  # Verificar integridad del shapefile
   if (shp_success) {
     message("\n>>> VERIFICANDO INTEGRIDAD DEL SHAPEFILE <<<")
     shp_path <- "data/Shapefiles/UACs_fixed.shp"
@@ -87,26 +84,8 @@ if (!dir.exists("data")) {
     if (!inherits(test_read, "try-error")) {
       message("✓ Shapefile VERIFICADO - ", nrow(test_read), " features encontradas")
       message("  Columnas disponibles: ", paste(names(test_read), collapse = ", "))
-      
-      # Detectar columna de nombres
-      possible_name_cols <- c("nombre", "NOMBRE", "Nombre", "name", "NAME", "Name", "UAC", "uac")
-      name_col_found <- FALSE
-      for (col in possible_name_cols) {
-        if (col %in% names(test_read)) {
-          message("  ✓ Columna de nombres detectada: ", col)
-          name_col_found <- TRUE
-          break
-        }
-      }
-      
-      if (!name_col_found) {
-        message("  ⚠ ADVERTENCIA: No se encontró columna de nombres estándar")
-        message("  Columnas disponibles: ", paste(names(test_read), collapse = ", "))
-      }
-      
     } else {
       message("✗ ERROR: Shapefile no se puede leer")
-      message("  Error: ", conditionMessage(attr(test_read, "condition")))
       shp_success <- FALSE
     }
   }
@@ -115,7 +94,6 @@ if (!dir.exists("data")) {
     stop("ERROR CRÍTICO: No se pudo descargar o verificar el shapefile UACs.")
   }
   
-  # Descargar rasters
   message("\n>>> DESCARGANDO RASTERS <<<")
   total_files <- length(especies) * length(meses) * 3
   file_count <- 0
@@ -155,10 +133,6 @@ if (!dir.exists("data")) {
   message("Datos ya disponibles localmente")
 }
 
-# ============================================================================
-# CONFIGURACIÓN DE RUTAS
-# ============================================================================
-
 base_path <- "data"
 uac_path <- file.path(base_path, "Shapefiles", "UACs_fixed.shp")
 
@@ -167,10 +141,6 @@ if (!file.exists(uac_path)) {
 }
 
 message("Configuración completada. Iniciando aplicación Shiny...")
-
-# ============================================================================
-# INTERFAZ DE USUARIO
-# ============================================================================
 
 ui <- dashboardPage(
   skin = "blue",
@@ -317,10 +287,6 @@ ui <- dashboardPage(
   )
 )
 
-# ============================================================================
-# SERVIDOR
-# ============================================================================
-
 server <- function(input, output, session) {
   
   species_names <- c(
@@ -344,13 +310,9 @@ server <- function(input, output, session) {
     name_column = NULL
   )
   
-  # ============================================================================
-  # FUNCIÓN PARA DETECTAR COLUMNA DE NOMBRES EN SHAPEFILE
-  # ============================================================================
-  
   detect_name_column <- function(sf_object) {
     possible_cols <- c("nombre", "NOMBRE", "Nombre", "name", "NAME", "Name", 
-                       "UAC", "uac", "id", "ID", "region", "REGION")
+                      "UAC", "uac", "id", "ID", "region", "REGION")
     
     for (col in possible_cols) {
       if (col %in% names(sf_object)) {
@@ -359,7 +321,6 @@ server <- function(input, output, session) {
       }
     }
     
-    # Si no encuentra ninguna, usar la primera columna no-geométrica
     non_geom_cols <- setdiff(names(sf_object), attr(sf_object, "sf_column"))
     if (length(non_geom_cols) > 0) {
       message("Usando primera columna disponible: ", non_geom_cols[1])
@@ -368,10 +329,6 @@ server <- function(input, output, session) {
     
     return(NULL)
   }
-  
-  # ============================================================================
-  # FUNCIÓN PARA CALCULAR ÁREA TOTAL DEL ÁREA DE ESTUDIO
-  # ============================================================================
   
   calculate_total_study_area <- function(species, base_path) {
     tryCatch({
@@ -397,10 +354,6 @@ server <- function(input, output, session) {
       return(NULL)
     })
   }
-  
-  # ============================================================================
-  # FUNCIÓN PARA CALCULAR ÁREAS MENSUALES
-  # ============================================================================
   
   calculate_monthly_areas <- function(species, base_path, threshold) {
     
@@ -481,10 +434,6 @@ server <- function(input, output, session) {
     return(resultados)
   }
   
-  # ============================================================================
-  # FUNCIÓN PARA GENERAR RESUMEN POR ESPECIE
-  # ============================================================================
-  
   generate_species_summary <- function(datos, species_name) {
     if (is.null(datos)) return("No hay datos disponibles")
     
@@ -548,10 +497,6 @@ server <- function(input, output, session) {
     return(parrafo)
   }
   
-  # ============================================================================
-  # CARGA DE DATOS PRINCIPALES
-  # ============================================================================
-  
   load_raster_data <- function() {
     tryCatch({
       withProgress(message = 'Cargando datos...', value = 0, {
@@ -608,7 +553,6 @@ server <- function(input, output, session) {
           return(FALSE)
         }
         
-        # DETECTAR COLUMNA DE NOMBRES
         name_col <- detect_name_column(uacs)
         if (is.null(name_col)) {
           message("ERROR: No se pudo detectar columna de nombres")
@@ -701,7 +645,6 @@ server <- function(input, output, session) {
   observeEvent(input$scenario, { if (raster_data$loaded) load_raster_data() }, ignoreInit = TRUE)
   observeEvent(input$threshold, { if (raster_data$loaded) load_raster_data() }, ignoreInit = TRUE)
   
-  # TÍTULOS
   month_names <- c("jan"="Enero", "feb"="Febrero", "mar"="Marzo",
                    "apr"="Abril", "may"="Mayo", "jun"="Junio",
                    "jul"="Julio", "aug"="Agosto", "sep"="Septiembre",
@@ -716,7 +659,6 @@ server <- function(input, output, session) {
           species_names[input$species], "-", month_names[input$month])
   })
   
-  # MAPAS PRINCIPALES
   output$map_present <- renderLeaflet({
     req(raster_data$present_prob)
     
@@ -825,7 +767,6 @@ server <- function(input, output, session) {
     ")
   })
   
-  # MAPA CON UACs
   output$map_uacs <- renderLeaflet({
     req(raster_data$changes, raster_data$uacs, raster_data$name_column)
     
@@ -839,7 +780,10 @@ server <- function(input, output, session) {
       uacs <- raster_data$uacs
       name_col <- raster_data$name_column
       
-      label_expr <- as.formula(paste0("~", name_col))
+      uac_labels <- as.character(st_drop_geometry(uacs)[[name_col]])
+      
+      message("Renderizando mapa con ", nrow(uacs), " UACs")
+      message("Labels: ", paste(uac_labels, collapse = ", "))
       
       leaflet() %>%
         setView(lng = -78.5, lat = 3, zoom = 7) %>%
@@ -851,7 +795,7 @@ server <- function(input, output, session) {
           color = "#000000",
           weight = 2,
           fillOpacity = 0,
-          label = label_expr,
+          label = uac_labels,
           highlightOptions = highlightOptions(
             weight = 4,
             color = "#FFFF00",
@@ -873,11 +817,10 @@ server <- function(input, output, session) {
         type = "error",
         duration = 10
       )
-      return(leaflet() %>% setView(lng = -78.5, lat = 3, zoom = 7))
+      return(leaflet() %>% setView(lng = -78.5, lat = 3, zoom = 7) %>% addProviderTiles(providers$Esri.OceanBasemap))
     })
   })
   
-  # SINCRONIZACIÓN
   last_sync_time <- reactiveVal(0)
   last_sync_source <- reactiveVal("")
   
@@ -939,7 +882,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # CÁLCULO DE ÁREAS TOTALES
   calculate_areas <- reactive({
     req(raster_data$changes)
     
@@ -962,7 +904,6 @@ server <- function(input, output, session) {
     })
   })
   
-  # CÁLCULO DE ÁREAS POR UAC
   calculate_uac_areas <- reactive({
     req(raster_data$changes, raster_data$uacs, raster_data$present_binary, 
         raster_data$future_binary, raster_data$name_column)
@@ -1028,10 +969,10 @@ server <- function(input, output, session) {
       
       tryCatch({
         orden_uacs <- c("Norte_Choco", "Baudo_San Juan", "Malaga_Buenaventura", "Llanura_Aluvial_Sur",
-                        "Norte_Chocó", "Baudó_San Juan", "Málaga_Buenaventura")
+                       "Norte_Chocó", "Baudó_San Juan", "Málaga_Buenaventura")
         
         df_result$UAC <- factor(df_result$UAC, 
-                                levels = intersect(orden_uacs, df_result$UAC))
+                               levels = intersect(orden_uacs, df_result$UAC))
         df_result <- df_result[order(df_result$UAC), ]
         df_result$UAC <- as.character(df_result$UAC)
       }, error = function(e) {
@@ -1056,7 +997,6 @@ server <- function(input, output, session) {
     })
   })
   
-  # INFOBOXES
   output$area_actual <- renderInfoBox({
     areas <- calculate_areas()
     infoBox("Área Potencial Actual", paste(format(areas$area_actual, big.mark=","), "km²"),
@@ -1081,7 +1021,6 @@ server <- function(input, output, session) {
             icon = icon("arrow-up"), color = "green", fill = TRUE)
   })
   
-  # TABLA UAC
   output$table_uac_complete <- renderDT({
     df <- calculate_uac_areas()
     
@@ -1139,7 +1078,6 @@ server <- function(input, output, session) {
     })
   })
   
-  # GRÁFICO GENERAL
   output$changes_barplot <- renderPlot({
     areas <- calculate_areas()
     valores <- c(areas$negativos, areas$sin_cambios, areas$positivos)
@@ -1154,7 +1092,6 @@ server <- function(input, output, session) {
     grid(nx = NA, ny = NULL, col = "gray90", lty = 1)
   })
   
-  # GRÁFICO COMPARACIÓN UACs
   output$uac_comparison_plot <- renderPlot({
     df <- calculate_uac_areas()
     
@@ -1229,10 +1166,6 @@ server <- function(input, output, session) {
       text(1, 1, "Error al generar gráfico", cex = 1.5)
     })
   })
-  
-  # ============================================================================
-  # ANÁLISIS TEMPORAL
-  # ============================================================================
   
   monthly_data <- reactive({
     req(input$species, input$threshold)
@@ -1391,4 +1324,5 @@ server <- function(input, output, session) {
                   fontWeight = 'bold')
   })
 }
+
 shinyApp(ui = ui, server = server)
