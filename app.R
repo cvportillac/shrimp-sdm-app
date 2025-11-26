@@ -10,68 +10,149 @@ library(DT)
 library(fmsb)
 
 # ============================================================================
-# DESCARGAR DATOS DESDE GITHUB
+# DESCARGAR DATOS DESDE GITHUB CON MANEJO ROBUSTO
 # ============================================================================
 
 github_raw <- "https://github.com/cvportillac/shrimp-sdm-app/raw/main"
 
+# Función auxiliar para descargar con reintentos
+download_with_retry <- function(url, destfile, max_attempts = 3) {
+  for (attempt in 1:max_attempts) {
+    result <- try({
+      download.file(url, destfile, mode = "wb", quiet = TRUE)
+      TRUE
+    }, silent = TRUE)
+    
+    if (!inherits(result, "try-error") && file.exists(destfile) && file.size(destfile) > 0) {
+      return(TRUE)
+    }
+    
+    if (attempt < max_attempts) {
+      Sys.sleep(1)
+    }
+  }
+  return(FALSE)
+}
+
 if (!dir.exists("data")) {
-  message("Descargando datos desde GitHub...")
+  message("========================================")
+  message("INICIANDO DESCARGA DE DATOS DESDE GITHUB")
+  message("========================================")
   
-  # Crear estructura de carpetas
-  dir.create("data/Shapefiles", recursive = TRUE)
+  dir.create("data/Shapefiles", recursive = TRUE, showWarnings = FALSE)
   especies <- c("L.occidentalis", "P.brevirostris", "P.californiensis", 
                 "S.agassizii", "X.rivetti")
   meses <- c("jan", "feb", "mar", "apr", "may", "jun", 
              "jul", "aug", "sep", "oct", "nov", "dec")
   
   for (sp in especies) {
-    dir.create(file.path("data", sp), recursive = TRUE)
+    dir.create(file.path("data", sp), recursive = TRUE, showWarnings = FALSE)
+  }
+  
+  # Descargar shapefiles PRIMERO
+  message("\n>>> DESCARGANDO SHAPEFILES (PRIORIDAD ALTA) <<<")
+  shp_components <- c("shp", "shx", "dbf", "prj")
+  shp_success <- TRUE
+  
+  for (ext in shp_components) {
+    filename <- paste0("UACs_fixed.", ext)
+    url <- paste0(github_raw, "/data/Shapefiles/", filename)
+    dest <- file.path("data/Shapefiles", filename)
+    
+    message("Descargando: ", filename, " ... ", appendLF = FALSE)
+    
+    if (download_with_retry(url, dest)) {
+      size <- file.size(dest)
+      if (size > 0) {
+        message("OK (", size, " bytes)")
+      } else {
+        message("FALLO - archivo vacío")
+        shp_success <- FALSE
+      }
+    } else {
+      message("FALLO - no se pudo descargar")
+      shp_success <- FALSE
+    }
+  }
+  
+  # Verificar integridad del shapefile
+  if (shp_success) {
+    message("\n>>> VERIFICANDO INTEGRIDAD DEL SHAPEFILE <<<")
+    shp_path <- "data/Shapefiles/UACs_fixed.shp"
+    
+    test_read <- try({
+      suppressWarnings(st_read(shp_path, quiet = TRUE))
+    }, silent = TRUE)
+    
+    if (!inherits(test_read, "try-error")) {
+      message("✓ Shapefile VERIFICADO - ", nrow(test_read), " features encontradas")
+      message("  Columnas disponibles: ", paste(names(test_read), collapse = ", "))
+      
+      # Detectar columna de nombres
+      possible_name_cols <- c("nombre", "NOMBRE", "Nombre", "name", "NAME", "Name", "UAC", "uac")
+      name_col_found <- FALSE
+      for (col in possible_name_cols) {
+        if (col %in% names(test_read)) {
+          message("  ✓ Columna de nombres detectada: ", col)
+          name_col_found <- TRUE
+          break
+        }
+      }
+      
+      if (!name_col_found) {
+        message("  ⚠ ADVERTENCIA: No se encontró columna de nombres estándar")
+        message("  Columnas disponibles: ", paste(names(test_read), collapse = ", "))
+      }
+      
+    } else {
+      message("✗ ERROR: Shapefile no se puede leer")
+      message("  Error: ", conditionMessage(attr(test_read, "condition")))
+      shp_success <- FALSE
+    }
+  }
+  
+  if (!shp_success) {
+    stop("ERROR CRÍTICO: No se pudo descargar o verificar el shapefile UACs.")
   }
   
   # Descargar rasters
-  total_files <- length(especies) * length(meses) * 3  # presente + 2 futuros
+  message("\n>>> DESCARGANDO RASTERS <<<")
+  total_files <- length(especies) * length(meses) * 3
   file_count <- 0
+  failed_count <- 0
   
   for (sp in especies) {
-    message("Descargando ", sp, "...")
+    message("Procesando especie: ", sp)
     for (mes in meses) {
-      # Presente
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_pres.tif")
       dest <- file.path("data", sp, paste0(mes, "_pres.tif"))
-      try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+      if (!download_with_retry(url, dest)) failed_count <- failed_count + 1
       file_count <- file_count + 1
       
-      # Futuro SSP 26
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_26.tif")
       dest <- file.path("data", sp, paste0(mes, "_2050_26.tif"))
-      try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+      if (!download_with_retry(url, dest)) failed_count <- failed_count + 1
       file_count <- file_count + 1
       
-      # Futuro SSP 85
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_85.tif")
       dest <- file.path("data", sp, paste0(mes, "_2050_85.tif"))
-      try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+      if (!download_with_retry(url, dest)) failed_count <- failed_count + 1
       file_count <- file_count + 1
       
-      if (file_count %% 10 == 0) {
-        message("Descargados ", file_count, " de ", total_files, " archivos...")
+      if (file_count %% 30 == 0) {
+        message("  Progreso: ", file_count, "/", total_files, " (fallidos: ", failed_count, ")")
       }
     }
   }
   
-  # Descargar shapefiles
-  message("Descargando shapefiles...")
-  shp_ext <- c(".shp", ".shx", ".dbf", ".prj", ".cpg")
-  for (ext in shp_ext) {
-    url <- paste0(github_raw, "/data/Shapefiles/UACs_fixed", ext)
-    dest <- file.path("data/Shapefiles", paste0("UACs_fixed", ext))
-    try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
-  }
+  message("\n========================================")
+  message("DESCARGA COMPLETADA")
+  message("Total archivos procesados: ", file_count)
+  message("Archivos fallidos: ", failed_count)
+  message("========================================\n")
   
-  message("¡Descarga completada!")
 } else {
-  message("Datos ya disponibles localmente.")
+  message("Datos ya disponibles localmente")
 }
 
 # ============================================================================
@@ -79,7 +160,13 @@ if (!dir.exists("data")) {
 # ============================================================================
 
 base_path <- "data"
-uac_path <- file.path(base_path, "Shapefiles/UACs_fixed.shp")
+uac_path <- file.path(base_path, "Shapefiles", "UACs_fixed.shp")
+
+if (!file.exists(uac_path)) {
+  stop("FATAL: Shapefile UACs no encontrado en: ", uac_path)
+}
+
+message("Configuración completada. Iniciando aplicación Shiny...")
 
 # ============================================================================
 # INTERFAZ DE USUARIO
@@ -253,8 +340,34 @@ server <- function(input, output, session) {
     future_binary = NULL,
     changes = NULL,
     uacs = NULL,
-    loaded = FALSE
+    loaded = FALSE,
+    name_column = NULL
   )
+  
+  # ============================================================================
+  # FUNCIÓN PARA DETECTAR COLUMNA DE NOMBRES EN SHAPEFILE
+  # ============================================================================
+  
+  detect_name_column <- function(sf_object) {
+    possible_cols <- c("nombre", "NOMBRE", "Nombre", "name", "NAME", "Name", 
+                       "UAC", "uac", "id", "ID", "region", "REGION")
+    
+    for (col in possible_cols) {
+      if (col %in% names(sf_object)) {
+        message("Columna de nombres detectada: ", col)
+        return(col)
+      }
+    }
+    
+    # Si no encuentra ninguna, usar la primera columna no-geométrica
+    non_geom_cols <- setdiff(names(sf_object), attr(sf_object, "sf_column"))
+    if (length(non_geom_cols) > 0) {
+      message("Usando primera columna disponible: ", non_geom_cols[1])
+      return(non_geom_cols[1])
+    }
+    
+    return(NULL)
+  }
   
   # ============================================================================
   # FUNCIÓN PARA CALCULAR ÁREA TOTAL DEL ÁREA DE ESTUDIO
@@ -299,7 +412,6 @@ server <- function(input, output, session) {
     
     especies_path <- file.path(base_path, species)
     
-    # Calcular área total una vez
     total_area <- calculate_total_study_area(species, base_path)
     
     if (is.null(total_area)) {
@@ -326,11 +438,9 @@ server <- function(input, output, session) {
         fut_85_file <- file.path(especies_path, paste0(mes, "_2050_85.tif"))
         
         if (!file.exists(pres_file)) {
-          message("Archivo no encontrado: ", pres_file)
           next
         }
         
-        # Presente - USAR UMBRAL DINÁMICO
         pres_rast <- rast(pres_file)
         pres_prob <- (pres_rast / 1000) * 100
         pres_bin <- pres_prob >= threshold
@@ -343,7 +453,6 @@ server <- function(input, output, session) {
         resultados$Presente[i] <- (area_pres / total_area) * 100
         resultados$Presente_km2[i] <- area_pres
         
-        # Futuro SSP 1-2.6
         if (file.exists(fut_26_file)) {
           fut_26_rast <- rast(fut_26_file)
           fut_26_prob <- (fut_26_rast / 1000) * 100
@@ -353,7 +462,6 @@ server <- function(input, output, session) {
           resultados$Futuro_2050_SSP126_km2[i] <- area_26
         }
         
-        # Futuro SSP 5-8.5
         if (file.exists(fut_85_file)) {
           fut_85_rast <- rast(fut_85_file)
           fut_85_prob <- (fut_85_rast / 1000) * 100
@@ -381,9 +489,8 @@ server <- function(input, output, session) {
     if (is.null(datos)) return("No hay datos disponibles")
     
     total_area <- attr(datos, "total_area")
-    area_uac <- 27965  # Área de las UACs en km²
+    area_uac <- 27965
     
-    # Calcular promedios
     prom_presente_km2 <- mean(datos$Presente_km2, na.rm = TRUE)
     prom_presente_porc <- (prom_presente_km2 / area_uac) * 100
     
@@ -393,14 +500,12 @@ server <- function(input, output, session) {
     prom_ssp585_km2 <- mean(datos$Futuro_2050_SSP585_km2, na.rm = TRUE)
     prom_ssp585_porc <- (prom_ssp585_km2 / area_uac) * 100
     
-    # Calcular cambios
     cambio_ssp126_km2 <- prom_ssp126_km2 - prom_presente_km2
     cambio_ssp126_porc <- ((prom_ssp126_km2 - prom_presente_km2) / prom_presente_km2) * 100
     
     cambio_ssp585_km2 <- prom_ssp585_km2 - prom_presente_km2
     cambio_ssp585_porc <- ((prom_ssp585_km2 - prom_presente_km2) / prom_presente_km2) * 100
     
-    # Determinar tipo de cambio y redacción
     if (cambio_ssp126_km2 > 0) {
       texto_ssp126 <- paste0("una expansión de ", 
                              format(round(cambio_ssp126_km2, 2), big.mark = ","), 
@@ -425,7 +530,6 @@ server <- function(input, output, session) {
                              " km² (", round(cambio_ssp585_porc, 2), "% respecto al presente)")
     }
     
-    # Construir párrafo
     parrafo <- paste0(
       "El análisis del área idónea para la distribución potencial de ", species_name, 
       " reveló un área promedio de ", format(round(prom_presente_km2, 2), big.mark = ","), 
@@ -463,13 +567,62 @@ server <- function(input, output, session) {
           return(FALSE)
         }
         
+        incProgress(0.2, detail = "Cargando shapefile UACs...")
+        
         if (!file.exists(uac_path)) {
-          showNotification("Shapefile UACs no encontrado", type = "error", duration = 5)
+          message("ERROR CRÍTICO: Shapefile no encontrado en: ", uac_path)
+          showNotification(
+            "Shapefile UACs no encontrado. Reinicie la aplicación.", 
+            type = "error", 
+            duration = NULL
+          )
           return(FALSE)
         }
         
-        incProgress(0.2, detail = "Cargando shapefile UACs...")
-        uacs <- st_read(uac_path, quiet = TRUE)
+        uacs <- tryCatch({
+          shp <- suppressWarnings(st_read(uac_path, quiet = TRUE))
+          message("Shapefile cargado con éxito")
+          message("Columnas disponibles: ", paste(names(shp), collapse = ", "))
+          shp
+        }, error = function(e) {
+          message("ERROR al leer shapefile: ", e$message)
+          showNotification(
+            paste("Error crítico al cargar shapefile:", e$message), 
+            type = "error", 
+            duration = NULL
+          )
+          return(NULL)
+        })
+        
+        if (is.null(uacs)) {
+          return(FALSE)
+        }
+        
+        if (nrow(uacs) == 0) {
+          message("ERROR: Shapefile sin features")
+          showNotification(
+            "El shapefile UACs no contiene datos válidos.", 
+            type = "error", 
+            duration = NULL
+          )
+          return(FALSE)
+        }
+        
+        # DETECTAR COLUMNA DE NOMBRES
+        name_col <- detect_name_column(uacs)
+        if (is.null(name_col)) {
+          message("ERROR: No se pudo detectar columna de nombres")
+          showNotification(
+            "No se pudo identificar la columna de nombres en el shapefile.", 
+            type = "error", 
+            duration = NULL
+          )
+          return(FALSE)
+        }
+        
+        raster_data$name_column <- name_col
+        message("Usando columna: '", name_col, "' para nombres de UACs")
+        
         uacs <- st_transform(uacs, crs = 4326)
         raster_data$uacs <- uacs
         
@@ -528,7 +681,12 @@ server <- function(input, output, session) {
       })
       
     }, error = function(e) {
-      showNotification(paste("Error:", e$message), type = "error", duration = 10)
+      message("ERROR GENERAL en load_raster_data: ", e$message)
+      showNotification(
+        paste("Error al cargar datos:", e$message), 
+        type = "error", 
+        duration = NULL
+      )
       raster_data$loaded <- FALSE
       return(FALSE)
     })
@@ -669,38 +827,54 @@ server <- function(input, output, session) {
   
   # MAPA CON UACs
   output$map_uacs <- renderLeaflet({
-    req(raster_data$changes, raster_data$uacs)
+    req(raster_data$changes, raster_data$uacs, raster_data$name_column)
     
-    pal <- colorFactor(
-      palette = c("#CCCCCC", "#E74C3C", "#F39C12", "#27AE60"),
-      domain = 0:3,
-      na.color = "transparent"
-    )
-    
-    leaflet() %>%
-      setView(lng = -78.5, lat = 3, zoom = 7) %>%
-      addProviderTiles(providers$Esri.OceanBasemap) %>%
-      addRasterImage(raster_data$changes, colors = pal, opacity = 0.7,
-                     project = FALSE, method = "ngb") %>%
-      addPolygons(
-        data = raster_data$uacs,
-        color = "#000000",
-        weight = 2,
-        fillOpacity = 0,
-        label = ~nombre,
-        highlightOptions = highlightOptions(
-          weight = 4,
-          color = "#FFFF00",
-          bringToFront = TRUE
-        )
-      ) %>%
-      addLegend(
-        colors = c("#E74C3C", "#F39C12", "#27AE60", "#CCCCCC"),
-        labels = c("Cambios Negativos", "Sin Cambios", "Cambios Positivos", "Ausencia"),
-        title = "Categorías",
-        position = "bottomright"
-      ) %>%
-      addScaleBar(position = "bottomleft")
+    tryCatch({
+      pal <- colorFactor(
+        palette = c("#CCCCCC", "#E74C3C", "#F39C12", "#27AE60"),
+        domain = 0:3,
+        na.color = "transparent"
+      )
+      
+      uacs <- raster_data$uacs
+      name_col <- raster_data$name_column
+      
+      label_expr <- as.formula(paste0("~", name_col))
+      
+      leaflet() %>%
+        setView(lng = -78.5, lat = 3, zoom = 7) %>%
+        addProviderTiles(providers$Esri.OceanBasemap) %>%
+        addRasterImage(raster_data$changes, colors = pal, opacity = 0.7,
+                       project = FALSE, method = "ngb") %>%
+        addPolygons(
+          data = uacs,
+          color = "#000000",
+          weight = 2,
+          fillOpacity = 0,
+          label = label_expr,
+          highlightOptions = highlightOptions(
+            weight = 4,
+            color = "#FFFF00",
+            bringToFront = TRUE
+          )
+        ) %>%
+        addLegend(
+          colors = c("#E74C3C", "#F39C12", "#27AE60", "#CCCCCC"),
+          labels = c("Cambios Negativos", "Sin Cambios", "Cambios Positivos", "Ausencia"),
+          title = "Categorías",
+          position = "bottomright"
+        ) %>%
+        addScaleBar(position = "bottomleft")
+      
+    }, error = function(e) {
+      message("ERROR en map_uacs: ", e$message)
+      showNotification(
+        paste("Error al renderizar mapa UACs:", e$message),
+        type = "error",
+        duration = 10
+      )
+      return(leaflet() %>% setView(lng = -78.5, lat = 3, zoom = 7))
+    })
   })
   
   # SINCRONIZACIÓN
@@ -768,80 +942,118 @@ server <- function(input, output, session) {
   # CÁLCULO DE ÁREAS TOTALES
   calculate_areas <- reactive({
     req(raster_data$changes)
-    res_x <- res(raster_data$changes)[1]
-    res_y <- res(raster_data$changes)[2]
-    pixel_area <- abs(res_x * res_y) * 111 * 111
-    vals <- values(raster_data$changes)
     
-    list(
-      negativos = round(sum(vals == 1, na.rm = TRUE) * pixel_area, 2),
-      sin_cambios = round(sum(vals == 2, na.rm = TRUE) * pixel_area, 2),
-      positivos = round(sum(vals == 3, na.rm = TRUE) * pixel_area, 2),
-      area_actual = round((sum(vals == 1, na.rm = TRUE) + sum(vals == 2, na.rm = TRUE)) * pixel_area, 2),
-      area_futura = round((sum(vals == 2, na.rm = TRUE) + sum(vals == 3, na.rm = TRUE)) * pixel_area, 2)
-    )
+    tryCatch({
+      res_x <- res(raster_data$changes)[1]
+      res_y <- res(raster_data$changes)[2]
+      pixel_area <- abs(res_x * res_y) * 111 * 111
+      vals <- values(raster_data$changes)
+      
+      list(
+        negativos = round(sum(vals == 1, na.rm = TRUE) * pixel_area, 2),
+        sin_cambios = round(sum(vals == 2, na.rm = TRUE) * pixel_area, 2),
+        positivos = round(sum(vals == 3, na.rm = TRUE) * pixel_area, 2),
+        area_actual = round((sum(vals == 1, na.rm = TRUE) + sum(vals == 2, na.rm = TRUE)) * pixel_area, 2),
+        area_futura = round((sum(vals == 2, na.rm = TRUE) + sum(vals == 3, na.rm = TRUE)) * pixel_area, 2)
+      )
+    }, error = function(e) {
+      message("ERROR en calculate_areas: ", e$message)
+      list(negativos = 0, sin_cambios = 0, positivos = 0, area_actual = 0, area_futura = 0)
+    })
   })
   
   # CÁLCULO DE ÁREAS POR UAC
   calculate_uac_areas <- reactive({
-    req(raster_data$changes, raster_data$uacs, raster_data$present_binary, raster_data$future_binary)
+    req(raster_data$changes, raster_data$uacs, raster_data$present_binary, 
+        raster_data$future_binary, raster_data$name_column)
     
-    uacs <- raster_data$uacs
-    changes_rast <- raster_data$changes
-    present_bin <- raster_data$present_binary
-    future_bin <- raster_data$future_binary
-    
-    uacs_vect <- vect(uacs)
-    
-    res_x <- res(changes_rast)[1]
-    res_y <- res(changes_rast)[2]
-    pixel_area <- abs(res_x * res_y) * 111 * 111
-    
-    results <- list()
-    
-    for (i in 1:nrow(uacs)) {
-      uac_name <- uacs$nombre[i]
-      uac_poly <- uacs_vect[i]
+    tryCatch({
+      uacs <- raster_data$uacs
+      changes_rast <- raster_data$changes
+      present_bin <- raster_data$present_binary
+      future_bin <- raster_data$future_binary
+      name_col <- raster_data$name_column
       
-      changes_extract <- extract(changes_rast, uac_poly, fun = NULL)
-      present_extract <- extract(present_bin, uac_poly, fun = NULL)
-      future_extract <- extract(future_bin, uac_poly, fun = NULL)
+      message("Calculando áreas por UAC usando columna: ", name_col)
       
-      changes_vals <- changes_extract[[2]]
-      present_vals <- present_extract[[2]]
-      future_vals <- future_extract[[2]]
+      uacs_vect <- vect(uacs)
       
-      negativos <- sum(changes_vals == 1, na.rm = TRUE) * pixel_area
-      sin_cambios <- sum(changes_vals == 2, na.rm = TRUE) * pixel_area
-      positivos <- sum(changes_vals == 3, na.rm = TRUE) * pixel_area
+      res_x <- res(changes_rast)[1]
+      res_y <- res(changes_rast)[2]
+      pixel_area <- abs(res_x * res_y) * 111 * 111
       
-      area_presente <- sum(present_vals == 1, na.rm = TRUE) * pixel_area
-      area_futura <- sum(future_vals == 1, na.rm = TRUE) * pixel_area
+      results <- list()
       
-      results[[uac_name]] <- list(
-        UAC = uac_name,
-        Area_Presente_km2 = round(area_presente, 2),
-        Area_Futura_km2 = round(area_futura, 2),
-        Cambio_Total_km2 = round(area_futura - area_presente, 2),
-        Cambio_Porcentaje = round(((area_futura - area_presente) / area_presente) * 100, 2),
-        Perdida_km2 = round(negativos, 2),
-        Sin_Cambios_km2 = round(sin_cambios, 2),
-        Ganancia_km2 = round(positivos, 2)
+      for (i in 1:nrow(uacs)) {
+        uac_name <- as.character(uacs[[name_col]][i])
+        
+        if (is.na(uac_name) || uac_name == "") {
+          uac_name <- paste0("UAC_", i)
+        }
+        
+        message("Procesando: ", uac_name)
+        
+        uac_poly <- uacs_vect[i]
+        
+        changes_extract <- extract(changes_rast, uac_poly, fun = NULL)
+        present_extract <- extract(present_bin, uac_poly, fun = NULL)
+        future_extract <- extract(future_bin, uac_poly, fun = NULL)
+        
+        changes_vals <- changes_extract[[2]]
+        present_vals <- present_extract[[2]]
+        future_vals <- future_extract[[2]]
+        
+        negativos <- sum(changes_vals == 1, na.rm = TRUE) * pixel_area
+        sin_cambios <- sum(changes_vals == 2, na.rm = TRUE) * pixel_area
+        positivos <- sum(changes_vals == 3, na.rm = TRUE) * pixel_area
+        
+        area_presente <- sum(present_vals == 1, na.rm = TRUE) * pixel_area
+        area_futura <- sum(future_vals == 1, na.rm = TRUE) * pixel_area
+        
+        results[[uac_name]] <- list(
+          UAC = uac_name,
+          Area_Presente_km2 = round(area_presente, 2),
+          Area_Futura_km2 = round(area_futura, 2),
+          Cambio_Total_km2 = round(area_futura - area_presente, 2),
+          Cambio_Porcentaje = round(ifelse(area_presente > 0, 
+                                           ((area_futura - area_presente) / area_presente) * 100, 
+                                           0), 2),
+          Perdida_km2 = round(negativos, 2),
+          Sin_Cambios_km2 = round(sin_cambios, 2),
+          Ganancia_km2 = round(positivos, 2)
+        )
+      }
+      
+      df_result <- do.call(rbind, lapply(results, as.data.frame))
+      
+      tryCatch({
+        orden_uacs <- c("Norte_Choco", "Baudo_San Juan", "Malaga_Buenaventura", "Llanura_Aluvial_Sur",
+                        "Norte_Chocó", "Baudó_San Juan", "Málaga_Buenaventura")
+        
+        df_result$UAC <- factor(df_result$UAC, 
+                                levels = intersect(orden_uacs, df_result$UAC))
+        df_result <- df_result[order(df_result$UAC), ]
+        df_result$UAC <- as.character(df_result$UAC)
+      }, error = function(e) {
+        message("No se pudo ordenar UACs, usando orden original")
+      })
+      
+      df_result$UAC <- gsub("Norte_Choco", "Norte_Chocó", df_result$UAC)
+      df_result$UAC <- gsub("Baudo_San Juan", "Baudó_San Juan", df_result$UAC)
+      df_result$UAC <- gsub("Malaga_Buenaventura", "Málaga_Buenaventura", df_result$UAC)
+      
+      message("Cálculo de áreas por UAC completado exitosamente")
+      return(df_result)
+      
+    }, error = function(e) {
+      message("ERROR CRÍTICO en calculate_uac_areas: ", e$message)
+      showNotification(
+        paste("Error al calcular áreas por UAC:", e$message),
+        type = "error",
+        duration = 10
       )
-    }
-    
-    df_result <- do.call(rbind, lapply(results, as.data.frame))
-    
-    orden_uacs <- c("Norte_Choco", "Baudo_San Juan", "Malaga_Buenaventura", "Llanura_Aluvial_Sur")
-    df_result$UAC <- factor(df_result$UAC, levels = orden_uacs)
-    df_result <- df_result[order(df_result$UAC), ]
-    df_result$UAC <- as.character(df_result$UAC)
-    
-    df_result$UAC <- gsub("Norte_Choco", "Norte_Chocó", df_result$UAC)
-    df_result$UAC <- gsub("Baudo_San Juan", "Baudó_San Juan", df_result$UAC)
-    df_result$UAC <- gsub("Malaga_Buenaventura", "Málaga_Buenaventura", df_result$UAC)
-    
-    return(df_result)
+      return(NULL)
+    })
   })
   
   # INFOBOXES
@@ -869,50 +1081,62 @@ server <- function(input, output, session) {
             icon = icon("arrow-up"), color = "green", fill = TRUE)
   })
   
-  # TABLA ÚNICA COMPLETA POR UAC
+  # TABLA UAC
   output$table_uac_complete <- renderDT({
     df <- calculate_uac_areas()
     
-    df_display <- data.frame(
-      UAC = gsub("_", " ", df$UAC),
-      Area_Presente = df$Area_Presente_km2,
-      Area_Futura = df$Area_Futura_km2,
-      Perdida = df$Perdida_km2,
-      Ganancia = df$Ganancia_km2,
-      Sin_Cambios = df$Sin_Cambios_km2
-    )
+    if (is.null(df)) {
+      return(datatable(data.frame(Error = "No se pudieron cargar los datos de UACs.")))
+    }
     
-    datatable(df_display,
-              options = list(
-                pageLength = 10, 
-                dom = 't',
-                scrollX = TRUE,
-                columnDefs = list(
-                  list(className = 'dt-center', targets = 1:5)
-                )
-              ),
-              rownames = FALSE,
-              colnames = c("UAC", 
-                           "Área Presente (km²)", 
-                           "Área Futura (km²)", 
-                           "Pérdida (km²)", 
-                           "Ganancia (km²)",
-                           "Sin Cambios (km²)")) %>%
-      formatRound(columns = 2:6, digits = 2) %>%
-      formatStyle('Area_Presente',
-                  backgroundColor = '#E3F2FD',
-                  fontWeight = 'bold') %>%
-      formatStyle('Area_Futura',
-                  backgroundColor = '#FFF3E0',
-                  fontWeight = 'bold') %>%
-      formatStyle('Perdida',
-                  backgroundColor = '#FFEBEE',
-                  color = '#C62828') %>%
-      formatStyle('Ganancia',
-                  backgroundColor = '#E8F5E9',
-                  color = '#2E7D32') %>%
-      formatStyle('Sin_Cambios',
-                  backgroundColor = '#F5F5F5')
+    req(!is.null(df))
+    
+    tryCatch({
+      df_display <- data.frame(
+        UAC = gsub("_", " ", df$UAC),
+        Area_Presente = df$Area_Presente_km2,
+        Area_Futura = df$Area_Futura_km2,
+        Perdida = df$Perdida_km2,
+        Ganancia = df$Ganancia_km2,
+        Sin_Cambios = df$Sin_Cambios_km2
+      )
+      
+      datatable(df_display,
+                options = list(
+                  pageLength = 10, 
+                  dom = 't',
+                  scrollX = TRUE,
+                  columnDefs = list(
+                    list(className = 'dt-center', targets = 1:5)
+                  )
+                ),
+                rownames = FALSE,
+                colnames = c("UAC", 
+                             "Área Presente (km²)", 
+                             "Área Futura (km²)", 
+                             "Pérdida (km²)", 
+                             "Ganancia (km²)",
+                             "Sin Cambios (km²)")) %>%
+        formatRound(columns = 2:6, digits = 2) %>%
+        formatStyle('Area_Presente',
+                    backgroundColor = '#E3F2FD',
+                    fontWeight = 'bold') %>%
+        formatStyle('Area_Futura',
+                    backgroundColor = '#FFF3E0',
+                    fontWeight = 'bold') %>%
+        formatStyle('Perdida',
+                    backgroundColor = '#FFEBEE',
+                    color = '#C62828') %>%
+        formatStyle('Ganancia',
+                    backgroundColor = '#E8F5E9',
+                    color = '#2E7D32') %>%
+        formatStyle('Sin_Cambios',
+                    backgroundColor = '#F5F5F5')
+      
+    }, error = function(e) {
+      message("ERROR en table_uac_complete: ", e$message)
+      datatable(data.frame(Error = paste("Error:", e$message)))
+    })
   })
   
   # GRÁFICO GENERAL
@@ -934,57 +1158,80 @@ server <- function(input, output, session) {
   output$uac_comparison_plot <- renderPlot({
     df <- calculate_uac_areas()
     
-    df$UAC_display <- gsub("_", " ", df$UAC)
-    orden_display <- c("Norte Chocó", "Baudó San Juan", "Málaga Buenaventura", "Llanura Aluvial Sur")
-    df$UAC_display <- factor(df$UAC_display, levels = orden_display)
+    if (is.null(df)) {
+      plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+      text(1, 1, "No se pudieron cargar los datos", cex = 1.5)
+      return()
+    }
     
-    par(mfrow = c(1, 2), mar = c(10, 5, 3, 2))
+    req(!is.null(df))
     
-    areas_matrix <- rbind(df$Area_Presente_km2, df$Area_Futura_km2)
-    colnames(areas_matrix) <- as.character(df$UAC_display)
-    
-    max_y1 <- max(areas_matrix) * 1.3
-    
-    bp1 <- barplot(areas_matrix, beside = TRUE,
-                   col = c("#5E35B1", "#FF6F00"),
-                   main = "Área Presente vs Futura por UAC",
-                   ylab = "Área (km²)",
-                   ylim = c(0, max_y1),
-                   las = 2,
-                   cex.names = 0.9,
-                   border = NA)
-    
-    legend("top", 
-           legend = c("Presente", "Futuro 2050"),
-           fill = c("#5E35B1", "#FF6F00"),
-           bty = "n",
-           horiz = TRUE,
-           xpd = TRUE)
-    
-    cambios_matrix <- rbind(df$Perdida_km2, df$Sin_Cambios_km2, df$Ganancia_km2)
-    colnames(cambios_matrix) <- as.character(df$UAC_display)
-    
-    max_y2 <- max(cambios_matrix) * 1.3
-    
-    bp2 <- barplot(cambios_matrix, beside = TRUE,
-                   col = c("#E74C3C", "#95A5A6", "#27AE60"),
-                   main = "Cambios por Categoría y UAC",
-                   ylab = "Área (km²)",
-                   ylim = c(0, max_y2),
-                   las = 2,
-                   cex.names = 0.9,
-                   border = NA)
-    
-    legend("top",
-           legend = c("Pérdida", "Sin Cambios", "Ganancia"),
-           fill = c("#E74C3C", "#95A5A6", "#27AE60"),
-           bty = "n",
-           horiz = TRUE,
-           xpd = TRUE)
+    tryCatch({
+      df$UAC_display <- gsub("_", " ", df$UAC)
+      
+      tryCatch({
+        orden_display <- c("Norte Chocó", "Baudó San Juan", "Málaga Buenaventura", "Llanura Aluvial Sur")
+        matching_order <- intersect(orden_display, df$UAC_display)
+        if (length(matching_order) > 0) {
+          df$UAC_display <- factor(df$UAC_display, levels = matching_order)
+        }
+      }, error = function(e) {
+        message("Usando orden original")
+      })
+      
+      par(mfrow = c(1, 2), mar = c(10, 5, 3, 2))
+      
+      areas_matrix <- rbind(df$Area_Presente_km2, df$Area_Futura_km2)
+      colnames(areas_matrix) <- as.character(df$UAC_display)
+      
+      max_y1 <- max(areas_matrix) * 1.3
+      
+      bp1 <- barplot(areas_matrix, beside = TRUE,
+                     col = c("#5E35B1", "#FF6F00"),
+                     main = "Área Presente vs Futura por UAC",
+                     ylab = "Área (km²)",
+                     ylim = c(0, max_y1),
+                     las = 2,
+                     cex.names = 0.9,
+                     border = NA)
+      
+      legend("top", 
+             legend = c("Presente", "Futuro 2050"),
+             fill = c("#5E35B1", "#FF6F00"),
+             bty = "n",
+             horiz = TRUE,
+             xpd = TRUE)
+      
+      cambios_matrix <- rbind(df$Perdida_km2, df$Sin_Cambios_km2, df$Ganancia_km2)
+      colnames(cambios_matrix) <- as.character(df$UAC_display)
+      
+      max_y2 <- max(cambios_matrix) * 1.3
+      
+      bp2 <- barplot(cambios_matrix, beside = TRUE,
+                     col = c("#E74C3C", "#95A5A6", "#27AE60"),
+                     main = "Cambios por Categoría y UAC",
+                     ylab = "Área (km²)",
+                     ylim = c(0, max_y2),
+                     las = 2,
+                     cex.names = 0.9,
+                     border = NA)
+      
+      legend("top",
+             legend = c("Pérdida", "Sin Cambios", "Ganancia"),
+             fill = c("#E74C3C", "#95A5A6", "#27AE60"),
+             bty = "n",
+             horiz = TRUE,
+             xpd = TRUE)
+      
+    }, error = function(e) {
+      message("ERROR en gráfico: ", e$message)
+      plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+      text(1, 1, "Error al generar gráfico", cex = 1.5)
+    })
   })
   
   # ============================================================================
-  # DIAGRAMA DE ARAÑA Y RESUMEN DE ESPECIE
+  # ANÁLISIS TEMPORAL
   # ============================================================================
   
   monthly_data <- reactive({
@@ -1144,5 +1391,4 @@ server <- function(input, output, session) {
                   fontWeight = 'bold')
   })
 }
-
 shinyApp(ui = ui, server = server)
