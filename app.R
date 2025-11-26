@@ -10,7 +10,7 @@ library(DT)
 library(fmsb)
 
 # ============================================================================
-# DESCARGAR DATOS DESDE GITHUB CON MANEJO ROBUSTO
+# DESCARGAR DATOS DESDE GITHUB
 # ============================================================================
 
 github_raw <- "https://github.com/cvportillac/shrimp-sdm-app/raw/main"
@@ -768,57 +768,78 @@ server <- function(input, output, session) {
   })
   
   output$map_uacs <- renderLeaflet({
-    req(raster_data$changes, raster_data$uacs, raster_data$name_column)
+    req(raster_data$loaded)
     
-    tryCatch({
-      pal <- colorFactor(
-        palette = c("#CCCCCC", "#E74C3C", "#F39C12", "#27AE60"),
-        domain = 0:3,
-        na.color = "transparent"
-      )
-      
-      uacs <- raster_data$uacs
-      name_col <- raster_data$name_column
-      
-      uac_labels <- as.character(st_drop_geometry(uacs)[[name_col]])
-      
-      message("Renderizando mapa con ", nrow(uacs), " UACs")
-      message("Labels: ", paste(uac_labels, collapse = ", "))
-      
-      leaflet() %>%
-        setView(lng = -78.5, lat = 3, zoom = 7) %>%
-        addProviderTiles(providers$Esri.OceanBasemap) %>%
-        addRasterImage(raster_data$changes, colors = pal, opacity = 0.7,
-                       project = FALSE, method = "ngb") %>%
-        addPolygons(
-          data = uacs,
-          color = "#000000",
-          weight = 2,
-          fillOpacity = 0,
-          label = uac_labels,
-          highlightOptions = highlightOptions(
-            weight = 4,
-            color = "#FFFF00",
-            bringToFront = TRUE
+    # Iniciar con un mapa básico
+    base_map <- leaflet() %>%
+      setView(lng = -78.5, lat = 3, zoom = 7) %>%
+      addProviderTiles(providers$Esri.OceanBasemap)
+    
+    # Intentar agregar el raster de cambios
+    if (!is.null(raster_data$changes)) {
+      tryCatch({
+        pal <- colorFactor(
+          palette = c("#CCCCCC", "#E74C3C", "#F39C12", "#27AE60"),
+          domain = 0:3,
+          na.color = "transparent"
+        )
+        
+        base_map <- base_map %>%
+          addRasterImage(raster_data$changes, colors = pal, opacity = 0.7,
+                         project = FALSE, method = "ngb")
+      }, error = function(e) {
+        message("Error agregando raster: ", e$message)
+      })
+    }
+    
+    # Intentar agregar UACs
+    if (!is.null(raster_data$uacs) && !is.null(raster_data$name_column)) {
+      tryCatch({
+        uacs <- raster_data$uacs
+        name_col <- raster_data$name_column
+        
+        # SOLUCIÓN CRÍTICA: Convertir a data frame primero para asegurar compatibilidad
+        uacs_df <- as.data.frame(uacs)
+        uac_labels <- as.character(uacs_df[[name_col]])
+        
+        # Si los labels son NA o vacíos, usar índices
+        if (any(is.na(uac_labels)) || any(uac_labels == "")) {
+          uac_labels[is.na(uac_labels) | uac_labels == ""] <- paste0("UAC_", which(is.na(uac_labels) | uac_labels == ""))
+        }
+        
+        message("Agregando ", nrow(uacs), " UACs al mapa")
+        message("Labels: ", paste(head(uac_labels, 10), collapse = ", "))
+        
+        base_map <- base_map %>%
+          addPolygons(
+            data = uacs,
+            color = "#000000",
+            weight = 2,
+            fillOpacity = 0,
+            label = lapply(uac_labels, htmltools::HTML),
+            highlightOptions = highlightOptions(
+              weight = 4,
+              color = "#FFFF00",
+              bringToFront = TRUE
+            )
           )
-        ) %>%
-        addLegend(
-          colors = c("#E74C3C", "#F39C12", "#27AE60", "#CCCCCC"),
-          labels = c("Cambios Negativos", "Sin Cambios", "Cambios Positivos", "Ausencia"),
-          title = "Categorías",
-          position = "bottomright"
-        ) %>%
-        addScaleBar(position = "bottomleft")
-      
-    }, error = function(e) {
-      message("ERROR en map_uacs: ", e$message)
-      showNotification(
-        paste("Error al renderizar mapa UACs:", e$message),
-        type = "error",
-        duration = 10
-      )
-      return(leaflet() %>% setView(lng = -78.5, lat = 3, zoom = 7) %>% addProviderTiles(providers$Esri.OceanBasemap))
-    })
+      }, error = function(e) {
+        message("ERROR agregando polígonos: ", e$message)
+        message("Traceback: ", paste(capture.output(traceback()), collapse = "\n"))
+      })
+    }
+    
+    # Agregar leyenda
+    base_map <- base_map %>%
+      addLegend(
+        colors = c("#E74C3C", "#F39C12", "#27AE60", "#CCCCCC"),
+        labels = c("Cambios Negativos", "Sin Cambios", "Cambios Positivos", "Ausencia"),
+        title = "Categorías",
+        position = "bottomright"
+      ) %>%
+      addScaleBar(position = "bottomleft")
+    
+    return(base_map)
   })
   
   last_sync_time <- reactiveVal(0)
