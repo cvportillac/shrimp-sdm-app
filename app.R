@@ -9,29 +9,38 @@ library(htmlwidgets)
 library(DT)
 library(fmsb)
 
+# Configurar locale para manejar caracteres UTF-8
+Sys.setlocale("LC_ALL", "C")
+
 github_raw <- "https://github.com/cvportillac/shrimp-sdm-app/raw/main"
 
-download_with_retry <- function(url, destfile, max_attempts = 3) {
+download_with_retry <- function(url, destfile, max_attempts = 3, timeout = 300) {
+  old_timeout <- getOption("timeout")
+  options(timeout = timeout)
+  
   for (attempt in 1:max_attempts) {
     result <- try({
-      download.file(url, destfile, mode = "wb", quiet = FALSE)
+      download.file(url, destfile, mode = "wb", quiet = FALSE, method = "libcurl")
       TRUE
     }, silent = FALSE)
+    
     if (!inherits(result, "try-error") && file.exists(destfile) && file.size(destfile) > 0) {
+      options(timeout = old_timeout)
       return(TRUE)
     }
+    
     if (attempt < max_attempts) {
-      Sys.sleep(2)
+      Sys.sleep(3)
     }
   }
+  
+  options(timeout = old_timeout)
   return(FALSE)
 }
 
 base_path <- "data"
 uac_path <- file.path(base_path, "Shapefiles", "UACs_fixed.shp")
 
-# Verificar si necesitamos descargar datos
-# Criterio: el shapefile UACs debe existir (archivo crítico)
 needs_download <- !file.exists(uac_path)
 
 if (needs_download) {
@@ -58,7 +67,7 @@ if (needs_download) {
     
     cat("Descargando:", filename, "...\n")
     
-    if (download_with_retry(url, dest)) {
+    if (download_with_retry(url, dest, max_attempts = 5, timeout = 300)) {
       size <- file.size(dest)
       if (size > 0) {
         cat("OK (", size, " bytes)\n")
@@ -86,17 +95,17 @@ if (needs_download) {
     for (mes in meses) {
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_pres.tif")
       dest <- file.path("data", sp, paste0(mes, "_pres.tif"))
-      if (!download_with_retry(url, dest)) failed_count <- failed_count + 1
+      if (!download_with_retry(url, dest, max_attempts = 3, timeout = 180)) failed_count <- failed_count + 1
       file_count <- file_count + 1
       
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_26.tif")
       dest <- file.path("data", sp, paste0(mes, "_2050_26.tif"))
-      if (!download_with_retry(url, dest)) failed_count <- failed_count + 1
+      if (!download_with_retry(url, dest, max_attempts = 3, timeout = 180)) failed_count <- failed_count + 1
       file_count <- file_count + 1
       
       url <- paste0(github_raw, "/data/", sp, "/", mes, "_2050_85.tif")
       dest <- file.path("data", sp, paste0(mes, "_2050_85.tif"))
-      if (!download_with_retry(url, dest)) failed_count <- failed_count + 1
+      if (!download_with_retry(url, dest, max_attempts = 3, timeout = 180)) failed_count <- failed_count + 1
       file_count <- file_count + 1
       
       if (file_count %% 30 == 0) {
@@ -114,11 +123,9 @@ if (needs_download) {
   cat("Shapefile UACs ya disponible - omitiendo descarga\n")
 }
 
-# Verificación final del archivo crítico
 if (!file.exists(uac_path)) {
   stop("FATAL: Shapefile UACs no disponible después de la descarga.\n",
-       "Ruta esperada: ", uac_path, "\n",
-       "Verifica que el archivo existe en GitHub y que la descarga fue exitosa.")
+       "Ruta esperada: ", uac_path)
 }
 
 cat("Shapefile UACs verificado correctamente\n")
@@ -352,9 +359,19 @@ server <- function(input, output, session) {
         
         uacs <- tryCatch({
           shp <- suppressWarnings(st_read(uac_path, quiet = TRUE))
-          if (!all(st_is_valid(shp))) {
+          
+          # CORRECCIÓN CRÍTICA: Validar geometrías de forma segura
+          valid_check <- tryCatch({
+            st_is_valid(shp)
+          }, error = function(e) {
+            rep(FALSE, nrow(shp))
+          })
+          
+          # Solo intentar corregir si hay geometrías inválidas
+          if (any(!valid_check, na.rm = TRUE)) {
             shp <- st_make_valid(shp)
           }
+          
           shp <- st_simplify(shp, preserveTopology = TRUE, dTolerance = 0.001)
           shp
         }, error = function(e) {
